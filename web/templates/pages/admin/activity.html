@@ -1,0 +1,55 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Activity</h1>
+    <p class="muted">Every live AI connection and the latest tool calls. Only who, which AI tool, which tool and when are kept, never what came back.</p>
+  </div>
+</div>
+
+<h2 class="subhead">Live connections</h2>
+{{if .Connections}}
+<div class="table-wrap">
+<table class="table">
+  <thead><tr><th>Person</th><th>AI tool</th><th>Returns to</th><th>Connected</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {{range .Connections}}
+    <tr>
+      <td>{{.Username}}</td>
+      <td>{{.ClientName}}</td>
+      <td><code>{{.RedirectHost}}</code></td>
+      <td>{{fmtTime .CreatedAt}}</td>
+      <td>{{fmtTime .LastUsedAt}}</td>
+      <td>
+        <form method="post" action="/admin/activity/connections/{{.ID}}/revoke" class="inline-form"
+              data-controller="confirm" data-confirm-message-value="Revoke {{.Username}}'s connection from {{.ClientName}}?"
+              data-action="submit->confirm#check">
+          {{template "csrf" $.CSRF}}
+          <button type="submit" class="btn btn--danger-ghost btn--sm">Revoke</button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<p class="muted">No live connections.</p>
+{{end}}
+
+<h2 class="subhead">Latest tool calls</h2>
+{{if .Calls}}
+<div class="table-wrap">
+<table class="table">
+  <thead><tr><th>When</th><th>Person</th><th>AI tool</th><th>Tool</th><th>Result</th><th class="num">ms</th></tr></thead>
+  <tbody>
+  {{range .Calls}}
+    <tr><td>{{fmtSQL .At}}</td><td>{{.Username}}</td><td>{{.ClientName}}</td><td><code>{{.Tool}}</code></td>
+      <td>{{if .OK}}OK{{else}}<span class="text-alert">Failed</span>{{end}}</td><td class="num">{{.DurationMS}}</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<p class="muted">Nothing yet.</p>
+{{end}}
+{{end}}

@@ -1,0 +1,49 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Redirect hosts</h1>
+    <p class="muted">AI tools may only connect when they send people back to one of these hosts. <code>localhost</code> and <code>127.0.0.1</code> allow any port (for desktop and command-line tools such as Claude Code). <code>*.example.org</code> allows any subdomain. Removing a host stops new connections there; existing ones carry on until revoked on Activity.</p>
+  </div>
+</div>
+
+<div class="table-wrap">
+<table class="table">
+  <thead><tr><th>Host</th><th>Note</th><th>Added</th><th></th></tr></thead>
+  <tbody>
+  {{range .Hosts}}
+    <tr>
+      <td><code>{{.Host}}</code></td>
+      <td>{{.Note}}</td>
+      <td>{{fmtSQL .CreatedAt}}</td>
+      <td>
+        <form method="post" action="/admin/redirect-hosts/delete" class="inline-form"
+              data-controller="confirm" data-confirm-message-value="Remove {{.Host}}?" data-action="submit->confirm#check">
+          {{template "csrf" $.CSRF}}
+          <input type="hidden" name="host" value="{{.Host}}">
+          <button type="submit" class="btn btn--danger-ghost btn--sm">Remove</button>
+        </form>
+      </td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4" class="muted">None: no AI tool can connect.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<section class="card narrow">
+  <h2>Add a host</h2>
+  <form method="post" action="/admin/redirect-hosts" class="form">
+    {{template "csrf" .CSRF}}
+    <div class="field">
+      <label for="host">Host</label>
+      <input id="host" name="host" required autocomplete="off" placeholder="claude.ai or *.example.org">
+    </div>
+    <div class="field">
+      <label for="note">Note <span class="optional">(optional)</span></label>
+      <input id="note" name="note" autocomplete="off" placeholder="Which AI tool uses it">
+    </div>
+    <div class="form__actions"><button type="submit" class="btn btn--primary">Add</button></div>
+  </form>
+</section>
+{{end}}

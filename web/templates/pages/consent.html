@@ -1,0 +1,32 @@
+{{define "content"}}
+<div class="auth-card card">
+  <h1>Allow {{.Req.Client.Name}}?</h1>
+  <p><strong>{{.Req.Client.Name}}</strong> wants to read the church's apps as <strong>{{.User.Name}}</strong>.</p>
+  <dl class="details">
+    <div><dt>It will send you back to</dt><dd><code>{{.Req.RedirectHost}}</code></dd></div>
+    {{with .Req.ClientHost}}<div><dt>Its details come from</dt><dd><code>{{.}}</code></dd></div>{{end}}
+    {{with .Apps}}<div><dt>Apps it can read</dt><dd>{{range $i, $a := .}}{{if $i}}, {{end}}{{$a}}{{end}} (only the ones you have access to)</dd></div>{{end}}
+  </dl>
+  <ul class="small">
+    <li>It sees only what you can see in each app.</li>
+    <li>It can't change, add or delete anything.</li>
+    <li>You can disconnect it at any time on <a href="/ai-tools">Connected AI tools</a>.</li>
+  </ul>
+  <p class="hint">Only allow this if you just asked {{.Req.Client.Name}} to connect, and you trust <code>{{.Req.RedirectHost}}</code>.</p>
+  <form method="post" action="/authorize" class="form">
+    {{template "csrf" .CSRF}}
+    <input type="hidden" name="client_id" value="{{.Query.Get "client_id"}}">
+    <input type="hidden" name="redirect_uri" value="{{.Query.Get "redirect_uri"}}">
+    <input type="hidden" name="state" value="{{.Query.Get "state"}}">
+    <input type="hidden" name="code_challenge" value="{{.Query.Get "code_challenge"}}">
+    <input type="hidden" name="code_challenge_method" value="{{.Query.Get "code_challenge_method"}}">
+    <input type="hidden" name="response_type" value="{{.Query.Get "response_type"}}">
+    <input type="hidden" name="resource" value="{{.Query.Get "resource"}}">
+    <input type="hidden" name="scope" value="{{.Query.Get "scope"}}">
+    <div class="form__actions">
+      <button type="submit" name="decision" value="allow" class="btn btn--primary">Allow</button>
+      <button type="submit" name="decision" value="deny" class="btn btn--ghost">Deny</button>
+    </div>
+  </form>
+</div>
+{{end}}

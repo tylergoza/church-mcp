@@ -1,0 +1,57 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Connected AI tools</h1>
+    <p class="muted">AI tools that can read the church's apps as you. Disconnecting one stops it at once. Connections also end when your access in User Management ends.</p>
+  </div>
+</div>
+
+{{if .Connections}}
+<div class="table-wrap">
+<table class="table">
+  <thead><tr><th>AI tool</th><th>Returns to</th><th>Connected</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {{range .Connections}}
+    <tr{{if not .Live}} class="is-past"{{end}}>
+      <td>{{.ClientName}}</td>
+      <td><code>{{.RedirectHost}}</code></td>
+      <td>{{fmtTime .CreatedAt}}</td>
+      <td>{{fmtTime .LastUsedAt}}</td>
+      <td>
+        {{if .Live}}
+          <form method="post" action="/ai-tools/{{.ID}}/revoke" class="inline-form"
+                data-controller="confirm" data-confirm-message-value="Disconnect {{.ClientName}}? It will need to be connected again to use the church's apps."
+                data-action="submit->confirm#check">
+            {{template "csrf" $.CSRF}}
+            <button type="submit" class="btn btn--danger-ghost btn--sm">Disconnect</button>
+          </form>
+        {{else}}
+          <span class="small muted">Ended {{fmtTime .RevokedAt}}{{with .RevokedWhy}}: {{.}}{{end}}</span>
+        {{end}}
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<div class="empty empty--inline"><p>No AI tools are connected. See <a href="/">Home</a> for how to connect one.</p></div>
+{{end}}
+
+<h2 class="subhead">What they looked up lately</h2>
+{{if .Calls}}
+<div class="table-wrap">
+<table class="table">
+  <thead><tr><th>When</th><th>AI tool</th><th>Tool</th><th>Result</th></tr></thead>
+  <tbody>
+  {{range .Calls}}
+    <tr><td>{{fmtSQL .At}}</td><td>{{.ClientName}}</td><td><code>{{.Tool}}</code></td><td>{{if .OK}}OK{{else}}<span class="text-alert">Failed</span>{{end}}</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+<p class="hint">Only which tool was used and when is kept, never what it returned.</p>
+{{else}}
+<p class="muted">Nothing yet.</p>
+{{end}}
+{{end}}

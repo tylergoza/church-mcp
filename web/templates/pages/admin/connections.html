@@ -1,0 +1,61 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Connections</h1>
+    <p class="muted">User Management (required) and the church apps the tools read. A connection set on the server (environment variables) wins over what's saved here. This app's sign-in callback is <code>{{.CallbackURL}}</code>.</p>
+  </div>
+</div>
+
+{{range .Connections}}
+{{$c := .}}
+<section class="card narrow" id="{{.Def.ID}}">
+  <h2>{{.Def.Name}}
+    {{if .FromEnv}}<span class="badge badge--warn">Set on the server</span>
+    {{else if .On}}<span class="badge badge--public">Set here</span>
+    {{else}}<span class="badge badge--locked">Default</span>{{end}}
+  </h2>
+  <p class="hint">{{.Def.Help}}</p>
+  {{with .ChangedBy}}<p class="small muted">Last changed by {{.}} · {{fmtSQL $c.ChangedAt}}</p>{{end}}
+  {{if eq $.ErrFor .Def.ID}}{{template "errors" $.Errors}}{{end}}
+
+  {{if .FromEnv}}
+    <dl class="details">
+      {{range .Fields}}
+        <div><dt>{{.Label}} <span class="muted small">({{.Env}})</span></dt>
+          <dd>{{if .Secret}}{{if .Set}}Set{{with .Ends}}, ends …{{.}}{{end}}{{else}}<span class="muted">Not set</span>{{end}}{{else}}{{if .Value}}{{.Value}}{{else}}<span class="muted">Not set</span>{{end}}{{end}}</dd></div>
+      {{end}}
+    </dl>
+  {{else}}
+    <form method="post" action="/admin/connections/{{.Def.ID}}" class="form">
+      {{template "csrf" $.CSRF}}
+      {{range .Fields}}
+        <div class="field">
+          <label for="{{.Key}}">{{.Label}}</label>
+          {{if .Secret}}
+            <input id="{{.Key}}" name="{{.Key}}" type="password" autocomplete="off"
+                   placeholder="{{if .Set}}Saved{{with .Ends}}, ends …{{.}}{{end}}; paste a new one to replace it{{else}}{{.Hint}}{{end}}">
+          {{else}}
+            <input id="{{.Key}}" name="{{.Key}}" value="{{.Value}}" {{if .URL}}inputmode="url"{{end}} autocomplete="off" placeholder="{{.Hint}}">
+          {{end}}
+        </div>
+      {{end}}
+      <div class="form__actions">
+        <button type="submit" class="btn btn--primary">Save</button>
+      </div>
+    </form>
+    {{if and .On (ne .Def.ID "sso")}}
+      <form method="post" action="/admin/connections/{{.Def.ID}}/clear" class="inline-form"
+            data-controller="confirm" data-confirm-message-value="Remove the saved {{.Def.Name}} settings?" data-action="submit->confirm#check">
+        {{template "csrf" $.CSRF}}
+        <button type="submit" class="btn btn--danger-ghost btn--sm">Remove saved settings</button>
+      </form>
+    {{end}}
+  {{end}}
+
+  <form method="post" action="/admin/connections/{{.Def.ID}}/test" class="inline-form">
+    {{template "csrf" $.CSRF}}
+    <button type="submit" class="btn btn--ghost btn--sm">Test</button>
+  </form>
+</section>
+{{end}}
+{{end}}

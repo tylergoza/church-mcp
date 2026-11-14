@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{{if .Title}}{{.Title}} · {{end}}{{.SiteName}}</title>
+  <meta name="theme-color" content="#4338ca">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="{{.SiteName}}">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="{{asset "icons/icon.svg"}}" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="{{asset "icons/apple-touch-icon.png"}}">
+  <link rel="stylesheet" href="{{asset "css/app.css"}}">
+  {{.ImportMap}}
+  <script type="module" src="{{asset "js/application.js"}}"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar" data-controller="nav" data-action="keydown.esc@window->nav#close">
+    <div class="topbar__inner">
+      <a class="brand" href="/">
+        <img src="{{asset "icons/icon.svg"}}" alt="" width="28" height="28">
+        <span>{{.SiteName}}</span>
+      </a>
+
+      <button class="nav-toggle" type="button" aria-controls="main-nav" aria-expanded="false"
+              data-nav-target="toggle" data-action="nav#toggle">
+        <span class="sr-only">Menu</span>
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+
+      <nav id="main-nav" class="nav" data-nav-target="menu" aria-label="Main">
+        {{if .User}}
+          <a href="/" {{if eq .Path "/"}}aria-current="page"{{end}}>Home</a>
+          <a href="/ai-tools" {{if hasPrefix .Path "/ai-tools"}}aria-current="page"{{end}}>Connected AI tools</a>
+          {{if .User.IsAdmin}}
+            <a href="/admin/activity" {{if eq .Path "/admin/activity"}}aria-current="page"{{end}}>Activity</a>
+            <a href="/admin/redirect-hosts" {{if eq .Path "/admin/redirect-hosts"}}aria-current="page"{{end}}>Redirect hosts</a>
+            <a href="/admin/connections" {{if eq .Path "/admin/connections"}}aria-current="page"{{end}}>Connections</a>
+          {{end}}
+        {{end}}
+        <span class="nav__spacer"></span>
+        <button type="button" class="btn btn--ghost btn--sm" hidden
+                data-controller="pwa--install" data-action="pwa--install#prompt">Install app</button>
+        {{if .User}}
+          <span class="nav__user">{{.User.Name}}</span>
+          <form method="post" action="/logout" class="nav__form">
+            <input type="hidden" name="_csrf" value="{{.CSRF}}">
+            <button type="submit" class="btn btn--ghost btn--sm">Sign out</button>
+          </form>
+        {{else}}
+          <a href="/login" class="btn btn--primary btn--sm">Sign in</a>
+        {{end}}
+      </nav>
+    </div>
+  </header>
+
+  <div class="offline-banner" hidden data-controller="pwa--network" role="status">
+    You're offline. This app needs a connection.
+  </div>
+
+  <main id="main" class="container">
+    {{with .SSOBroken}}
+      <div class="flash flash--error" role="alert">
+        <span>Single sign-on settings are broken: {{.}}. Fix them on <a href="/admin/connections">Connections</a>.</span>
+      </div>
+    {{end}}
+    {{with .Flash}}
+      <div class="flash flash--{{.Kind}}" role="status" data-controller="flash" data-flash-timeout-value="6000">
+        <span>{{.Message}}</span>
+        <button type="button" class="flash__close" data-action="flash#dismiss" aria-label="Dismiss">×</button>
+      </div>
+    {{end}}
+    {{template "content" .}}
+  </main>
+
+  <footer class="footer container">
+    <span>{{.SiteName}} · read-only access to the church's apps for AI tools</span>
+  </footer>
+</body>
+</html>
+{{define "csrf"}}<input type="hidden" name="_csrf" value="{{.}}">{{end}}
+{{define "errors"}}{{if .}}<div class="alert alert--error" role="alert"><ul>{{range .}}<li>{{.}}</li>{{end}}</ul></div>{{end}}{{end}}

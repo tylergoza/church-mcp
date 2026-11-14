@@ -1,0 +1,33 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1>Use the church's apps from an AI tool</h1>
+    <p class="muted">Claude, ChatGPT and other AI tools can read the calendar, directory, event planner, maintenance tracker and production planner <strong>as you</strong>: they see only what you can see, and can't change anything.</p>
+  </div>
+</div>
+
+<section class="card narrow">
+  <h2>Connect</h2>
+  <p>Add a custom connector (also called an MCP server) in your AI tool with this address:</p>
+  <p><code class="claim-url">{{.MCPURL}}</code></p>
+  <p class="hint">The AI tool sends you here to sign in with your church account and to allow it. In Claude Code: <code>claude mcp add --transport http church {{.MCPURL}}</code></p>
+  {{if not .SSOOn}}<div class="alert alert--error" role="alert">Sign-in isn't set up yet, so nothing can connect. An admin sets it up with the <code>church-mcp connection set-sso</code> command.</div>{{end}}
+</section>
+
+{{if .User}}
+<section class="card narrow">
+  <h2>Your connections</h2>
+  {{if .LiveCount}}
+    <p>You have {{.LiveCount}} AI tool{{if ne .LiveCount 1}}s{{end}} connected.</p>
+  {{else}}
+    <p class="muted">No AI tools are connected to your account.</p>
+  {{end}}
+  <p><a class="btn btn--primary" href="/ai-tools">See and end connections</a></p>
+</section>
+{{else}}
+<section class="card narrow">
+  <p>Sign in to see and end the AI tools connected to your account.</p>
+  <p><a class="btn btn--primary" href="/login">Sign in</a></p>
+</section>
+{{end}}
+{{end}}
