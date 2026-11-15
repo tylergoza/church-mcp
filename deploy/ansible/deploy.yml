@@ -1,0 +1,287 @@
+# Tests and builds the Linux binary on this machine, installs it and the systemd
+# unit on every droplet tagged do_tag, then writes this app's Caddy site on the
+# edge box(es). The database (and secrets.key beside it) is backed up
+# first whenever the binary changes (migrations run on start).
+#
+#   with-do-church make deploy   # or ansible-playbook deploy.yml here
+#
+# With -e restore_pending=true the binary and unit go in but the app isn't
+# started and SSO isn't set, so `make restore` finds no database.
+#
+# First SSO connection (README: Deploying): saved from the Keychain item um-mcp
+# when the database has none yet; -e set_sso=true saves it again.
+#   with-do-church make deploy SET_SSO=true
+#
+# To roll back, check out the previous commit and deploy it. If its
+# migrations changed the database, restore the pre-deploy backup as well
+# (README: Moving between hosts).
+
+- name: Build
+  hosts: localhost
+  gather_facts: false
+  vars_files: [defaults.yml, vars.yml]
+  vars:
+    repo_root: "{{ playbook_dir | dirname | dirname }}"
+  tasks:
+    - name: Check the account
+      ansible.builtin.include_tasks: tasks/check_account.yml
+
+    - name: Find the droplets
+      ansible.builtin.include_tasks: tasks/find_droplets.yml
+
+    - name: Check there's somewhere to deploy to
+      ansible.builtin.assert:
+        that: groups['app'] | default([]) | length > 0
+        fail_msg: No droplets are tagged {{ do_tag }}. Run provision.yml first.
+        quiet: true
+
+    - name: Check there's an edge box to route through
+      ansible.builtin.assert:
+        that: groups['edge'] | default([]) | length > 0
+        fail_msg: >-
+          No droplet is tagged {{ edge_tag }}, so nothing would serve {{ app_domain }}.
+          Provision the edge box first (edge_proxy: make provision).
+        quiet: true
+
+    - name: Check the app box has a VPC address
+      ansible.builtin.assert:
+        that: hostvars[groups['app'][0]].private_ip | length > 0
+        fail_msg: "{{ groups['app'][0] }} has no private (VPC) address, which the app binds to."
+        quiet: true
+
+    - name: Run the tests
+      ansible.builtin.command:
+        cmd: make test
+        chdir: "{{ repo_root }}"
+      when: not skip_tests | bool
+      changed_when: false
+
+    - name: Build the binary
+      ansible.builtin.command:
+        cmd: make build-linux
+        chdir: "{{ repo_root }}"
+      changed_when: true
+
+- name: Install
+  hosts: app
+  gather_facts: false
+  vars_files: [defaults.yml, vars.yml]
+  vars:
+    binary: "{{ playbook_dir | dirname | dirname }}/bin/church-mcp-linux-amd64"
+    # Commands run as the service user so the files they write stay its own.
+    # runuser rather than become: Ubuntu 26.04's default sudo is sudo-rs.
+    mcp: [runuser, -u, mcp, --, /usr/local/bin/church-mcp, -db, "{{ app_db }}"]
+  handlers:
+    # Not while a restore is pending: the app mustn't start and make an empty database.
+    - name: Restart the app
+      ansible.builtin.systemd_service:
+        name: church-mcp
+        state: restarted
+        daemon_reload: true
+      when: not restore_pending | bool
+  tasks:
+    - name: Checksum the new binary
+      ansible.builtin.stat:
+        path: "{{ binary }}"
+      delegate_to: localhost
+      register: new_binary
+
+    - name: Checksum the installed binary
+      ansible.builtin.stat:
+        path: /usr/local/bin/church-mcp
+      register: old_binary
+
+    - name: Check for a database
+      ansible.builtin.stat:
+        path: "{{ app_db }}"
+      register: db
+
+    # secrets.key encrypts the saved tokens; it sits beside the database and is
+    # backed up with it (the app creates it on first start, so it may be missing).
+    - name: Check for the secrets key
+      ansible.builtin.stat:
+        path: "{{ app_data_dir }}/secrets.key"
+      register: secrets_key
+
+    - name: Decide whether to back up
+      ansible.builtin.set_fact:
+        needs_backup: "{{ db.stat.exists and old_binary.stat.checksum | default('') != new_binary.stat.checksum }}"
+
+    # One stem for all files, so a backup is always the .db and its .key together.
+    - name: Name the pre-deploy backup
+      ansible.builtin.set_fact:
+        backup_stem: "{{ app_backup_dir ~ '/pre-deploy-' ~ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+      when: needs_backup
+
+    - name: Back up the database
+      ansible.builtin.command:
+        argv: "{{ mcp + ['backup', backup_stem ~ '.db'] }}"
+      when: needs_backup
+      changed_when: true
+
+    - name: Back up the secrets key
+      ansible.builtin.copy:
+        src: "{{ app_data_dir }}/secrets.key"
+        dest: "{{ backup_stem ~ '.key' }}"
+        remote_src: true
+        owner: mcp
+        group: mcp
+        mode: "0600"
+      when: needs_backup and secrets_key.stat.exists
+
+    - name: Install the binary
+      ansible.builtin.copy:
+        src: "{{ binary }}"
+        dest: /usr/local/bin/church-mcp
+        mode: "0755"
+      notify: Restart the app
+
+    - name: Install the systemd unit
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../church-mcp.service"
+        dest: /etc/systemd/system/church-mcp.service
+        mode: "0644"
+      notify: Restart the app
+
+    - name: Create the unit's drop-in folder
+      ansible.builtin.file:
+        path: /etc/systemd/system/church-mcp.service.d
+        state: directory
+        mode: "0755"
+
+    # The unit in the repo has a placeholder TZ and listens on loopback; this
+    # overrides both (ADDR is the box's VPC address, where the edge box's Caddy
+    # reaches it) and keeps TRUST_PROXY on. Nothing about SSO goes here: it's
+    # saved in the database (below), so it stays editable on /admin/connections.
+    - name: Set the address and time zone
+      ansible.builtin.copy:
+        content: |
+          [Service]
+          Environment=ADDR={{ private_ip }}:{{ app_port }}
+          Environment=TZ={{ tz }}
+          Environment=TRUST_PROXY=1
+        dest: /etc/systemd/system/church-mcp.service.d/override.conf
+        mode: "0600"
+      notify: Restart the app
+
+    # church-mcp has no local login, so the first single sign-on connection is
+    # saved here, before the app first starts: the client secret comes from the
+    # Keychain on this Mac (item {{ keychain_service }}) and goes in on
+    # stdin, never in a command line or the output. Runs when the database has
+    # no saved secret yet, or with -e set_sso=true (new secret or address).
+    # Not while a restore is pending: the restored database brings its own.
+    - name: Check whether single sign-on is saved
+      ansible.builtin.command:
+        argv: [runuser, -u, mcp, --, sqlite3, "{{ app_db }}", "SELECT count(*) FROM settings WHERE key = 'sso_client_secret'"]
+      register: sso_saved
+      changed_when: false
+      when: db.stat.exists
+
+    - name: Decide whether to set single sign-on
+      ansible.builtin.set_fact:
+        sso_needed: >-
+          {{ sso_set_on_deploy | bool and not restore_pending | bool
+             and (set_sso | bool or not db.stat.exists or (sso_saved.stdout | default('0') | trim) == '0') }}
+
+    - name: Read the client secret from the Keychain
+      ansible.builtin.command:
+        argv: [security, find-generic-password, -w, -s, "{{ keychain_service }}"]
+      delegate_to: localhost
+      register: keychain_secret
+      no_log: true
+      changed_when: false
+      failed_when: false
+      when: sso_needed | bool
+
+    - name: Check the Keychain had it
+      ansible.builtin.assert:
+        that: keychain_secret.rc == 0 and (keychain_secret.stdout | trim | length) > 0
+        fail_msg: >-
+          Single sign-on isn't saved yet and the Keychain item {{ keychain_service }} wasn't found.
+          Save the mcp app's client secret there (security add-generic-password -s {{ keychain_service }} -w),
+          or set -e sso_set_on_deploy=false and connect on /admin/connections.
+        quiet: true
+      when: sso_needed | bool
+
+    - name: Save single sign-on
+      ansible.builtin.command:
+        argv: "{{ mcp + ['connection', 'set-sso', sso_url, sso_client_id, base_url] }}"
+        stdin: "{{ keychain_secret.stdout | trim }}"
+      no_log: true
+      changed_when: true
+      when: sso_needed | bool
+      notify: Restart the app
+
+    # The restore starts it, once the database is in place.
+    - name: Let systemd see the new unit
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: restore_pending | bool
+
+    - name: Start the app
+      ansible.builtin.systemd_service:
+        name: church-mcp
+        enabled: true
+        state: started
+        daemon_reload: true
+      when: not restore_pending | bool
+
+    - name: Apply restarts
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the app to answer
+      ansible.builtin.uri:
+        url: http://{{ private_ip }}:{{ app_port }}/healthz
+      register: health
+      until: health.status == 200
+      retries: 15
+      delay: 2
+      when: not restore_pending | bool
+
+    - name: Find old pre-deploy backups
+      ansible.builtin.find:
+        paths: "{{ app_backup_dir }}"
+        patterns: ["pre-deploy-*.db", "pre-deploy-*.key"]
+      register: backups
+
+    # A backup is its .db and .key together: keep the newest
+    # {{ keep_backups }} .db files and every .key that goes with one. Anything else goes.
+    - name: Remove all but the newest {{ keep_backups }}
+      vars:
+        newest_stems: "{{ (backups.files | selectattr('path', 'match', '.*\\.db$') | sort(attribute='mtime', reverse=true) | map(attribute='path') | map('regex_replace', '\\.db$', '') | list)[:keep_backups | int] }}"
+        kept_paths: "{{ (newest_stems | map('regex_replace', '$', '.db') | list) + (newest_stems | map('regex_replace', '$', '.key') | list) }}"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ backups.files | map(attribute='path') | difference(kept_paths) }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Installed, not started: run make restore next.' if restore_pending | bool else
+             'Deployed to https://' ~ app_domain ~ '. Add https://' ~ app_domain ~ '/mcp as a custom connector in claude.ai.' }}
+
+# Each app owns its route: the edge box(es) get this app's site file, then
+# Caddy reloads. With two edge boxes both are written.
+- name: Route the domain through the edge box
+  hosts: edge
+  gather_facts: false
+  vars_files: [defaults.yml, vars.yml]
+  tasks:
+    - name: Create the Caddy sites folder
+      ansible.builtin.file:
+        path: /etc/caddy/sites
+        state: directory
+        mode: "0755"
+
+    - name: Install this app's Caddy site
+      ansible.builtin.template:
+        src: site.caddy.j2
+        dest: /etc/caddy/sites/church-mcp.caddy
+        mode: "0644"
+        validate: caddy validate --adapter caddyfile --config %s
+
+    - name: Reload Caddy
+      ansible.builtin.include_tasks: tasks/caddy_reload.yml

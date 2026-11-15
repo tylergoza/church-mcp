@@ -18,6 +18,7 @@ import (
 
 	"github.com/tylergoza/church-mcp/internal/store"
 	"github.com/tylergoza/church-mcp/internal/tools"
+	"github.com/tylergoza/church-mcp/internal/um"
 )
 
 // OAuth 2.1 authorization server for AI clients ------------------------------
@@ -407,11 +408,28 @@ func (s *Server) handleAuthorizeDecision(w http.ResponseWriter, r *http.Request)
 		s.redirectBack(w, r, a, url.Values{"error": {"access_denied"}, "error_description": {"the person said no"}})
 		return
 	}
+	// The connection gets a grant of its own in User Management, so it
+	// outlives signing out there.
+	grant, err := s.aiGrant(sess.Grant)
+	switch {
+	case errors.Is(err, um.ErrGrantRevoked):
+		s.problem(w, r, http.StatusUnauthorized, "Signed out", "Your sign-in ended. Start connecting again from the AI tool.")
+		return
+	case errors.Is(err, um.ErrNoAccess):
+		s.log.Error("User Management won't give this app AI grants", "err", err)
+		s.problem(w, r, http.StatusBadGateway, "Can't connect this AI tool", "User Management doesn't allow this server to keep AI connections yet. Ask an admin.")
+		return
+	case err != nil:
+		s.log.Error("ai grant", "err", err)
+		s.problem(w, r, http.StatusBadGateway, "Can't connect this AI tool", "User Management didn't answer. Try again in a moment.")
+		return
+	}
 	connID, err := s.store.CreateConnection(store.Connection{
 		UserID: user.ID, ClientID: a.Client.ID, ClientName: a.Client.Name, RedirectHost: a.RedirectHost,
-		Scope: a.Scope, Resource: a.Resource, Grant: sess.Grant,
+		Scope: a.Scope, Resource: a.Resource, Grant: grant,
 	})
 	if err != nil {
+		s.revokeInUM([]string{grant})
 		s.serverError(w, r, err)
 		return
 	}

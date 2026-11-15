@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/tylergoza/church-mcp/internal/mcp"
@@ -45,6 +46,44 @@ type trItem struct {
 	Place        trPlaceRef `json:"place"`
 	Manufacturer string     `json:"manufacturer"`
 	Model        string     `json:"model"`
+	Notes        string     `json:"notes"`
+	Supply       string     `json:"supply"`
+	SupplyPer    int        `json:"supply_per"`
+	Units        []trUnit   `json:"units"`
+}
+
+// trUnit is one numbered unit of a group item (e.g. one of four air
+// returns in a room).
+type trUnit struct {
+	Number       int    `json:"number"`
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	LastReplaced string `json:"last_replaced"`
+}
+
+// unitLines renders a group item's units, one indented line each:
+// "    #1 Northwest (away from sanctuary): filter last replaced Sat Nov 7, 2026".
+func unitLines(units []trUnit, supply string) string {
+	if len(units) == 0 {
+		return ""
+	}
+	what := "supply"
+	if supply != "" {
+		what = supply
+	}
+	var b strings.Builder
+	for _, u := range units {
+		name := "#" + strconv.Itoa(u.Number)
+		if u.ID != "" && u.ID != strconv.Itoa(u.Number) {
+			name += " (ID " + u.ID + ")"
+		}
+		last := "no replacement recorded"
+		if u.LastReplaced != "" {
+			last = what + " last replaced " + fmtDate(u.LastReplaced)
+		}
+		b.WriteString("\n    " + join(" ", name, u.Label) + ": " + last)
+	}
+	return b.String()
 }
 
 type trSupply struct {
@@ -57,14 +96,46 @@ type trSupply struct {
 	Stock  string     `json:"stock"` // ok | low | out
 }
 
+type trTask struct {
+	ID              int64      `json:"id"`
+	Item            string     `json:"item"`
+	Place           trPlaceRef `json:"place"`
+	Name            string     `json:"name"`
+	Interval        string     `json:"interval"`
+	LastCompletedOn string     `json:"last_completed_on"`
+	NextDueOn       string     `json:"next_due_on"`
+	Status          string     `json:"status"` // overdue | due-soon | upcoming | unscheduled
+	Supply          string     `json:"supply"`
+	SupplyAmount    int        `json:"supply_amount"`
+	SupplyShort     bool       `json:"supply_short"`
+	Description     string     `json:"description"`
+	Quantity        int        `json:"quantity"`
+	ItemNotes       string     `json:"item_notes"`
+	Units           []trUnit   `json:"units"`
+}
+
+type trLog struct {
+	ID          int64      `json:"id"`
+	PerformedOn string     `json:"performed_on"`
+	Item        string     `json:"item"`
+	Place       trPlaceRef `json:"place"`
+	Task        string     `json:"task"`
+	Kind        string     `json:"kind"` // work | replaced | moved
+	Replaced    string     `json:"replaced"`
+	Units       string     `json:"units"`
+	SupplyUsed  string     `json:"supply_used"`
+	PerformedBy string     `json:"performed_by"`
+	Notes       string     `json:"notes"`
+}
+
 var trackerKinds = []string{"places", "products", "items", "supplies"}
 
 func trackerTools() []Def {
-	return []Def{
+	return append([]Def{
 		{App: "tracker", Tool: tool("tracker_find", "Tracker: find",
-			"Search the maintenance tracker: places (buildings, rooms), products (kinds of equipment), items (where each thing is) and supplies (stock levels). Searches all four unless kind is given.",
+			"Search the maintenance tracker: places (buildings, rooms), products (kinds of equipment), items (where each thing is) and supplies (stock levels). Searches all four unless kind is given. For \"what do our stocks look like?\" use kind: \"supplies\" with no q (lists every supply with how many are on hand; low: true for just those running low or out). This does NOT say when work was done or what is due: for \"when were the furnace filters last changed?\" use tracker_history, and for \"what maintenance is overdue?\" use tracker_maintenance.",
 			map[string]any{
-				"q":    str("What to look for, e.g. \"projector\" or \"fellowship hall\"."),
+				"q":    str("What to look for, e.g. \"projector\" or \"fellowship hall\". Optional only with kind: \"supplies\"."),
 				"kind": enum("Only this kind.", trackerKinds...),
 				"low":  map[string]any{"type": "boolean", "description": "Supplies only: just the ones running low or out."},
 			}),
@@ -83,8 +154,9 @@ func trackerTools() []Def {
 				if a.Low {
 					kinds = []string{"supplies"}
 				}
-				if strings.TrimSpace(a.Q) == "" && !a.Low {
-					return mcp.Result{}, argError("q is needed (or low: true for supplies running low).")
+				// No q is fine for supplies alone: the stock overview.
+				if strings.TrimSpace(a.Q) == "" && !a.Low && a.Kind != "supplies" {
+					return mcp.Result{}, argError("q is needed (or kind: \"supplies\" alone for every supply, or low: true for supplies running low).")
 				}
 				var sections []string
 				for _, k := range kinds {
@@ -107,6 +179,129 @@ func trackerTools() []Def {
 					return mcp.Text(fmt.Sprintf("Nothing in the tracker matches %q.", a.Q)), nil
 				}
 				return mcp.Text(strings.Join(sections, "\n\n")), nil
+			}},
+	}, trackerMaintenanceTools()...)
+}
+
+var trackerStatuses = []string{"overdue", "due-soon", "upcoming", "unscheduled"}
+
+func (t trTask) line() string {
+	last := "never recorded"
+	if t.LastCompletedOn != "" {
+		last = fmtDate(t.LastCompletedOn)
+	}
+	due := "no due date"
+	if t.NextDueOn != "" {
+		due = "due " + fmtDate(t.NextDueOn)
+	}
+	supply := ""
+	if t.Supply != "" {
+		supply = "uses "
+		if t.SupplyAmount > 1 {
+			supply += strconv.Itoa(t.SupplyAmount) + " × "
+		}
+		supply += t.Supply
+		if t.SupplyShort {
+			supply += " (NOT ENOUGH ON HAND)"
+		}
+		supply += ";"
+	}
+	item := t.Item
+	if t.Quantity > 1 {
+		item = fmt.Sprintf("%s ×%d", t.Item, t.Quantity)
+	}
+	return join(" ", strings.ToUpper(t.Status)+":", item+" —", t.Name, "("+strings.ToLower(t.Interval)+");",
+		"last done "+last+";", due+";", atPlace("at ", t.Place.Path+semicolonIf(t.Place.Path)), supply,
+		atPlace("Instructions: ", t.Description), atPlace("Item notes: ", t.ItemNotes)) + unitLines(t.Units, t.Supply)
+}
+
+func (l trLog) line() string {
+	what := orDefault(l.Task, l.Kind)
+	if l.Replaced != "" {
+		what += " (replaced " + l.Replaced + ")"
+	} else if l.SupplyUsed != "" {
+		what += " (used " + l.SupplyUsed + ")"
+	}
+	if l.Units != "" {
+		what += " on " + l.Units
+	}
+	return join(" ", fmtDate(l.PerformedOn)+":", l.Item+" —", what, atPlace("by ", l.PerformedBy), atPlace("at ", l.Place.Path), atPlace("— ", l.Notes))
+}
+
+func trackerMaintenanceTools() []Def {
+	return []Def{
+		{App: "tracker", Tool: tool("tracker_maintenance", "Tracker: maintenance schedule",
+			"Scheduled maintenance tasks from the tracker, most urgent first: item, task, how often, when it was last completed, when it is next due, whether it is overdue, how many of its supply one check uses, its instructions and item notes. When an item is a group (e.g. an air return ×4 in one room), each unit is listed on its own line with its location label and when its filter/supply was last replaced: report every unit. Use for \"what maintenance is overdue?\" (status: overdue) or \"what is due soon?\"; q finds one task (\"furnace filter\") and its last_completed date tells when it was last done. For the full record of what was done and when (every filter change, who did it), use tracker_history.",
+			map[string]any{
+				"q":      str("Optional: matches the item, task or supply name, e.g. \"filter\"."),
+				"status": enum("Only tasks in this state.", trackerStatuses...),
+				"place":  str("Optional: part of a place name, e.g. \"kitchen\"."),
+			}),
+			Run: func(ctx context.Context, env Env, raw json.RawMessage) (mcp.Result, error) {
+				var a struct{ Q, Status, Place string }
+				if err := parse(raw, &a); err != nil {
+					return mcp.Result{}, err
+				}
+				q := url.Values{}
+				for k, v := range map[string]string{"q": a.Q, "status": a.Status, "place": a.Place} {
+					if strings.TrimSpace(v) != "" {
+						q.Set(k, strings.TrimSpace(v))
+					}
+				}
+				var out struct {
+					Tasks []trTask `json:"tasks"`
+				}
+				if err := env.Get(ctx, "/api/v1/me/tasks", q, &out); err != nil {
+					return mcp.Result{}, err
+				}
+				var ls []string
+				for _, t := range out.Tasks {
+					ls = append(ls, t.line())
+				}
+				return lines("Maintenance tasks, most urgent first:", ls, "No maintenance tasks match."), nil
+			}},
+		{App: "tracker", Tool: tool("tracker_history", "Tracker: maintenance history",
+			"What maintenance was done and when, newest first: date, item, task, what was replaced (e.g. \"2 × Furnace filters\"), who did it, notes. Use for \"when were the furnace filters last changed?\" (q: \"filter\"; the first line is the latest), \"what was done this year?\" (since). For what is coming due or overdue, use tracker_maintenance.",
+			map[string]any{
+				"q":     str("Optional: matches the item, task or supply name, e.g. \"filter\" or \"furnace\"."),
+				"since": str("Optional: only work done on or after this date, YYYY-MM-DD."),
+				"limit": num("Optional: how many entries, newest first (default and most 40)."),
+			}),
+			Run: func(ctx context.Context, env Env, raw json.RawMessage) (mcp.Result, error) {
+				var a struct {
+					Q, Since string
+					Limit    int
+				}
+				if err := parse(raw, &a); err != nil {
+					return mcp.Result{}, err
+				}
+				since, err := dateArg("since", a.Since, "")
+				if err != nil {
+					return mcp.Result{}, err
+				}
+				q := url.Values{}
+				if strings.TrimSpace(a.Q) != "" {
+					q.Set("q", strings.TrimSpace(a.Q))
+				}
+				if since != "" {
+					q.Set("since", since)
+				}
+				if a.Limit > 0 && a.Limit < maxLines {
+					q.Set("limit", fmt.Sprint(a.Limit))
+				} else {
+					q.Set("limit", fmt.Sprint(maxLines))
+				}
+				var out struct {
+					History []trLog `json:"history"`
+				}
+				if err := env.Get(ctx, "/api/v1/me/history", q, &out); err != nil {
+					return mcp.Result{}, err
+				}
+				var ls []string
+				for _, l := range out.History {
+					ls = append(ls, l.line())
+				}
+				return lines("Maintenance history, newest first:", ls, "No maintenance history matches."), nil
 			}},
 	}
 }
@@ -151,7 +346,15 @@ func trackerSearch(ctx context.Context, env Env, kind string, q url.Values) ([]s
 			if it.Quantity > 1 {
 				n = fmt.Sprintf("x%d", it.Quantity)
 			}
-			ls = append(ls, join(" ", fmt.Sprintf("#%d", it.ID), it.Name, n, join(" ", it.Manufacturer, it.Model), atPlace("— at ", it.Place.Path)))
+			supply := ""
+			if it.Supply != "" {
+				supply = "uses " + it.Supply
+				if it.SupplyPer > 1 {
+					supply = fmt.Sprintf("uses %d × %s each", it.SupplyPer, it.Supply)
+				}
+			}
+			ls = append(ls, join(" ", fmt.Sprintf("#%d", it.ID), it.Name, n, join(" ", it.Manufacturer, it.Model), atPlace("— at ", it.Place.Path),
+				atPlace("— ", supply), atPlace("— notes: ", it.Notes))+unitLines(it.Units, it.Supply))
 		}
 	case "supplies":
 		var out struct {
@@ -175,6 +378,14 @@ func trackerSearch(ctx context.Context, env Env, kind string, q url.Values) ([]s
 
 // atPlace is "<prefix><path>", or "" when the app sent no path, so a line
 // never ends in a dangling "at".
+// semicolonIf is ";" when s isn't blank.
+func semicolonIf(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	return ";"
+}
+
 func atPlace(prefix, path string) string {
 	if path == "" {
 		return ""

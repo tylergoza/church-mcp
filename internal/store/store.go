@@ -36,6 +36,10 @@ type Store struct {
 	// box seals secret settings with the key in secrets.key, which sits
 	// next to the database.
 	box *secrets.Box
+	// OnGrantsEnded, if set, is called after connections are revoked with
+	// their User Management grants, so those can be revoked there too.
+	// It runs after the database change has committed.
+	OnGrantsEnded func(grants []string)
 }
 
 // Open opens (creating if needed) the SQLite database at path and applies

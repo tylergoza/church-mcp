@@ -13,6 +13,7 @@ import (
 
 	"github.com/tylergoza/church-mcp/internal/sso"
 	"github.com/tylergoza/church-mcp/internal/store"
+	"github.com/tylergoza/church-mcp/internal/um"
 )
 
 // Sign-in through User Management -------------------------------------------
@@ -277,5 +278,37 @@ func (s *Server) checkConnectionGrant(c *store.Connection, user *store.User) *st
 func (s *Server) endConnection(id int64, why string) {
 	if err := s.store.RevokeConnection(id, 0, why); err != nil {
 		s.log.Error("revoke connection", "id", id, "err", err)
+	}
+}
+
+// AI grants ------------------------------------------------------------------
+//
+// An AI connection doesn't hold the browser-session grant from sign-in: at
+// the end of /authorize it trades it for an AI grant in User Management
+// that survives signing out there. Ending a connection here (the Connected
+// AI tools page, an admin, a reused refresh or code, a reconnect) revokes
+// that grant too.
+
+type grantIssuer struct{ um.GrantIssuer }
+
+// aiGrant trades the browser session's grant for an AI grant.
+func (s *Server) aiGrant(sessionGrant string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), grantCheckTimeout)
+	defer cancel()
+	return s.umGrants.Load().MakeAIGrant(ctx, sessionGrant)
+}
+
+// revokeInUM revokes AI grants in User Management, after their
+// connections were ended here. A failure is logged: the connection is
+// already dead here, and the person can still cut the grant off from My
+// account in User Management (or it ends with a password change).
+func (s *Server) revokeInUM(grants []string) {
+	for _, g := range grants {
+		ctx, cancel := context.WithTimeout(context.Background(), grantCheckTimeout)
+		err := s.umGrants.Load().RevokeAIGrant(ctx, g)
+		cancel()
+		if err != nil {
+			s.log.Warn("couldn't revoke an AI grant in User Management", "err", err)
+		}
 	}
 }

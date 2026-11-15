@@ -136,7 +136,8 @@ func (s *Store) CreateConnection(c Connection) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	if err := revokeTx(tx, `user_id = ? AND client_id = ? AND revoked_at IS NULL`, "replaced by a new connection", c.UserID, c.ClientID); err != nil {
+	ended, err := s.revokeTx(tx, `user_id = ? AND client_id = ? AND revoked_at IS NULL`, "replaced by a new connection", c.UserID, c.ClientID)
+	if err != nil {
 		return 0, err
 	}
 	res, err := tx.Exec(`INSERT INTO ai_connections (user_id, client_id, client_name, redirect_host, scope, resource, grant_sealed)
@@ -145,7 +146,11 @@ func (s *Store) CreateConnection(c Connection) (int64, error) {
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
-	return id, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.endedGrants(ended)
+	return id, nil
 }
 
 // GetConnection is a connection with its grant opened, live or not.
@@ -182,6 +187,14 @@ func (s *Store) listConnections(where string, args ...any) ([]Connection, error)
 	return out, rows.Err()
 }
 
+// endedGrants passes the User Management grants of connections that were
+// just revoked to OnGrantsEnded, so the server can revoke them there too.
+func (s *Store) endedGrants(grants []string) {
+	if len(grants) > 0 && s.OnGrantsEnded != nil {
+		s.OnGrantsEnded(grants)
+	}
+}
+
 // RevokeConnection ends a connection and deletes its tokens. userID 0
 // means any owner (an admin, or the server itself).
 func (s *Store) RevokeConnection(id, userID int64, why string) error {
@@ -194,10 +207,15 @@ func (s *Store) RevokeConnection(id, userID int64, why string) error {
 	if userID != 0 {
 		where, args = where+` AND user_id = ?`, append(args, userID)
 	}
-	if err := revokeTx(tx, where, why, args...); err != nil {
+	ended, err := s.revokeTx(tx, where, why, args...)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.endedGrants(ended)
+	return nil
 }
 
 // RevokeUserConnections ends all of a person's connections.
@@ -207,40 +225,53 @@ func (s *Store) RevokeUserConnections(userID int64, why string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := revokeTx(tx, `user_id = ? AND revoked_at IS NULL`, why, userID); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func revokeTx(tx *sql.Tx, where, why string, args ...any) error {
-	rows, err := tx.Query(`SELECT id FROM ai_connections WHERE `+where, args...)
+	ended, err := s.revokeTx(tx, `user_id = ? AND revoked_at IS NULL`, why, userID)
 	if err != nil {
 		return err
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.endedGrants(ended)
+	return nil
+}
+
+// revokeTx ends the connections matching where and returns their opened
+// User Management grants, for the caller to pass to endedGrants once the
+// transaction has committed.
+func (s *Store) revokeTx(tx *sql.Tx, where, why string, args ...any) ([]string, error) {
+	rows, err := tx.Query(`SELECT id, grant_sealed FROM ai_connections WHERE `+where, args...)
+	if err != nil {
+		return nil, err
+	}
 	var ids []int64
+	var grants []string
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var sealed string
+		if err := rows.Scan(&id, &sealed); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		ids = append(ids, id)
+		if g, err := s.box.Open(sealed); err == nil && g != "" {
+			grants = append(grants, g)
+		}
 	}
 	rows.Close()
 	now := sqlTime(time.Now())
 	for _, id := range ids {
 		if _, err := tx.Exec(`UPDATE ai_connections SET revoked_at = ?, revoked_why = ? WHERE id = ?`, now, why, id); err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := tx.Exec(`DELETE FROM oauth_tokens WHERE connection_id = ?`, id); err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := tx.Exec(`DELETE FROM oauth_codes WHERE connection_id = ?`, id); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return grants, nil
 }
 
 func (s *Store) MarkConnectionGrantChecked(id int64) error {
@@ -298,12 +329,14 @@ func (s *Store) UseCode(code string) (*Code, error) {
 		return nil, notFound(err)
 	}
 	if used.Valid {
-		if err := revokeTx(tx, `id = ? AND revoked_at IS NULL`, "an authorization code was used twice", c.ConnectionID); err != nil {
+		ended, err := s.revokeTx(tx, `id = ? AND revoked_at IS NULL`, "an authorization code was used twice", c.ConnectionID)
+		if err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
+		s.endedGrants(ended)
 		return nil, ErrCodeReused
 	}
 	if expires <= sqlTime(time.Now()) {

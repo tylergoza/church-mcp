@@ -48,6 +48,8 @@ type Config struct {
 	// Delegator replaces the User Management delegation client (tests).
 	// Nil: built from the single sign-on connection.
 	Delegator um.Delegator
+	// GrantIssuer replaces the User Management AI-grant client (tests).
+	GrantIssuer um.GrantIssuer
 	// HTTPClient is used for app calls and Client ID Metadata Documents.
 	// Nil: a default with timeouts.
 	HTTPClient *http.Client
@@ -74,6 +76,7 @@ type Server struct {
 	ssoBaseURL atomic.Value
 	ssoBroken  atomic.Value
 	delegator  atomic.Pointer[um.Cached]
+	umGrants   atomic.Pointer[grantIssuer]
 
 	apps    *apps.Client
 	cimd    *cimdCache
@@ -94,6 +97,7 @@ func New(cfg Config, st *store.Store, logger *slog.Logger) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, store: st, log: logger, grants: newGrantChecks(), limiter: newLimiter(30, 10*time.Minute)}
 	s.apps = apps.New()
+	st.OnGrantsEnded = s.revokeInUM
 	if cfg.HTTPClient != nil {
 		s.apps.HTTP = cfg.HTTPClient
 	}
@@ -199,6 +203,11 @@ func (s *Server) reloadSSO() error {
 		d = &um.HTTP{BaseURL: c.InternalURL, ClientID: c.ClientID, ClientSecret: c.ClientSecret, Client: s.cfg.HTTPClient}
 	}
 	s.delegator.Store(um.NewCached(d))
+	var gi um.GrantIssuer = s.cfg.GrantIssuer
+	if gi == nil {
+		gi = &um.HTTP{BaseURL: c.InternalURL, ClientID: c.ClientID, ClientSecret: c.ClientSecret, Client: s.cfg.HTTPClient}
+	}
+	s.umGrants.Store(&grantIssuer{gi})
 	return nil
 }
 

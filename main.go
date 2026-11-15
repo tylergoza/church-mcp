@@ -40,7 +40,7 @@ func env(key, fallback string) string {
 
 // churchZone is used when TZ isn't set: the church's apps all show local
 // time without a zone, and that's Eastern.
-const churchZone = "America/New_York"
+const churchZone = "America/Chicago"
 
 func main() {
 	addr := flag.String("addr", env("ADDR", ":8150"), "listen address (env ADDR)")

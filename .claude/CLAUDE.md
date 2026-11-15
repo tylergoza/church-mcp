@@ -38,5 +38,9 @@ SDK (README "Why no MCP SDK").
 - Secrets never go in files or `export` lines in docs; the user keeps them
   in the macOS Keychain and runs make through `~/.zshrc` helpers.
 - CSP is `style-src 'self'`: no inline `style=` attributes in templates.
-- No deploy yet; phase 4 adds `deploy/ansible` like the other apps.
+- Deploy (`deploy/ansible`, phase 4): `mcp.mountainviewbaptist.church` on
+  `apps-1` behind the edge box, like the other apps (`with-do-church make
+  provision|deploy`). State is `mcp.db` plus `secrets.key`. With no local
+  login, the first deploy sets SSO from the Keychain `um-mcp`
+  (`make deploy SET_SSO=true` to set it again).
 - The user runs all `git commit`s themselves (YubiKey signing). Don't commit.

@@ -104,3 +104,49 @@ func TestCacheIsPerGrantAndAudience(t *testing.T) {
 }
 
 var farFuture = time.Now().Add(24 * time.Hour)
+
+func TestAIGrants(t *testing.T) {
+	var gotMethod, gotGrant string
+	var status atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id, s, ok := r.BasicAuth(); !ok || id != "mcp" || s != "sec" || r.URL.Path != "/api/v1/ai-grants" {
+			t.Errorf("bad call: %s %s", r.Method, r.URL.Path)
+		}
+		gotMethod, gotGrant = r.Method, r.Header.Get("X-Grant")
+		if st := int(status.Load()); st != 200 {
+			w.WriteHeader(st)
+			fmt.Fprint(w, `{"error":"not_allowed"}`)
+			return
+		}
+		if r.Method == http.MethodPost {
+			fmt.Fprint(w, `{"grant":"umai_xyz"}`)
+			return
+		}
+		fmt.Fprint(w, `{"revoked":true}`)
+	}))
+	defer ts.Close()
+	h := &HTTP{BaseURL: ts.URL, ClientID: "mcp", ClientSecret: "sec"}
+	ctx := context.Background()
+
+	status.Store(200)
+	g, err := h.MakeAIGrant(ctx, "session-grant")
+	if err != nil || g != "umai_xyz" || gotMethod != "POST" || gotGrant != "session-grant" {
+		t.Fatalf("make: %q %v (%s %s)", g, err, gotMethod, gotGrant)
+	}
+	if err := h.RevokeAIGrant(ctx, g); err != nil || gotMethod != "DELETE" || gotGrant != "umai_xyz" {
+		t.Fatalf("revoke: %v (%s %s)", err, gotMethod, gotGrant)
+	}
+	// A pre-AI-grant (session) grant is not sent anywhere.
+	gotMethod = ""
+	if err := h.RevokeAIGrant(ctx, "old-session-grant"); err != nil || gotMethod != "" {
+		t.Errorf("old grant: %v %q", err, gotMethod)
+	}
+	status.Store(403)
+	if _, err := h.MakeAIGrant(ctx, "s"); !errors.Is(err, ErrNoAccess) {
+		t.Errorf("not allowed: %v", err)
+	}
+	status.Store(500)
+	if _, err := h.MakeAIGrant(ctx, "s"); !errors.Is(err, ErrUnreachable) {
+		t.Errorf("outage: %v", err)
+	}
+}

@@ -1,7 +1,7 @@
 BINARY := church-mcp
 LDFLAGS := -s -w
 
-.PHONY: dev run test vet build build-linux build-linux-arm clean
+.PHONY: dev run test vet build build-linux build-linux-arm provision deploy backup restore move clean
 
 # Serve templates/static from disk: edit HTML/JS/CSS and just refresh.
 # Port 8150, so the church's other apps (8080 to 8140) can run alongside.
@@ -29,8 +29,34 @@ build-linux:
 build-linux-arm:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/$(BINARY)-linux-arm64 .
 
-# Deploying (deploy/ansible, like the other apps) comes in phase 4 of
-# ../.claude/plans/mcp-server.md.
+# DigitalOcean with Ansible (README: Deploying). Run through the Keychain
+# helpers, e.g. `with-do-church make deploy`, except backup FROM=<ip>,
+# which needs only SSH.
+#   make provision [RESTORE_PENDING=true]   box, alerts, DNS, then deploy
+#   make deploy [SET_SSO=true]              SET_SSO saves single sign-on again from the Keychain (um-mcp)
+#   make backup FROM=<ip or name> [STOP=true]
+#   make restore [BACKUP=latest|<dir>] [FORCE=true]
+#   make move FROM=<box>                    to the apps_box in vars.yml
+RESTORE_PENDING ?= false
+SET_SSO ?= false
+STOP    ?= false
+FORCE   ?= false
+BACKUP  ?= latest
+
+provision:
+	cd deploy/ansible && ansible-playbook provision.yml -e restore_pending=$(RESTORE_PENDING) -e set_sso=$(SET_SSO)
+
+deploy:
+	cd deploy/ansible && ansible-playbook deploy.yml -e set_sso=$(SET_SSO)
+
+backup:
+	cd deploy/ansible && ansible-playbook backup.yml -e from=$(FROM) -e stop=$(STOP)
+
+restore:
+	cd deploy/ansible && ansible-playbook restore.yml -e backup=$(BACKUP) -e force=$(FORCE)
+
+move:
+	cd deploy/ansible && ansible-playbook move.yml -e from=$(FROM) -e force=$(FORCE)
 
 clean:
 	rm -rf bin

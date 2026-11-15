@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tylergoza/church-mcp/internal/mcp"
 	"github.com/tylergoza/church-mcp/internal/store"
 )
 
@@ -44,8 +43,8 @@ func (s *Server) routes() http.Handler {
 
 	// The MCP endpoint (handlers_mcp.go).
 	mux.HandleFunc("POST /mcp", s.handleMCP)
-	mux.HandleFunc("GET /mcp", func(w http.ResponseWriter, r *http.Request) { mcp.ServeGet(w) })
-	mux.HandleFunc("DELETE /mcp", func(w http.ResponseWriter, r *http.Request) { mcp.ServeGet(w) })
+	mux.HandleFunc("GET /mcp", s.handleMCPOther)
+	mux.HandleFunc("DELETE /mcp", s.handleMCPOther)
 
 	// Signing in through User Management (sso.go).
 	mux.HandleFunc("GET /login", s.handleLogin)

@@ -83,14 +83,24 @@ it sends them back to. **Connected AI tools** lists and ends connections.
   connection). Access tokens `mcpa_…` last an hour; refresh tokens
   `mcpr_…` last 30 days and rotate on every use, and reusing an old one
   revokes the whole connection. Only SHA-256 hashes are stored.
-- A connection keeps the person's User Management grant (sealed with
-  `secrets.key`, next to the database). It is re-checked with User
-  Management at most every 5 minutes; when the grant has ended, or the
-  person lost their role here, the connection is revoked. A 401 from
-  `/mcp` carries `WWW-Authenticate: Bearer resource_metadata="…"`.
-- Signing out of this site is local only: signing out of User Management
-  would end the grant that every AI connection made from it depends on.
-  (Long-lived grants for delegation are a User Management TODO.)
+- At the end of `/authorize` (after sign-in and consent) the server trades
+  the browser sign-in's User Management grant for an **AI grant** of its
+  own (`POST /api/v1/ai-grants`; User Management only gives one to an app
+  with a "May act for users in" list). A connection keeps that grant
+  (sealed with `secrets.key`, next to the database), so it survives
+  signing out of User Management. It is re-checked with User Management at
+  most every 5 minutes; when the grant has ended (password change or
+  reset, account disabled, revoked) or the person lost their role here, the
+  connection is revoked. A 401 from `/mcp` carries
+  `WWW-Authenticate: Bearer resource_metadata="…"`.
+- Ending a connection here (Connected AI tools, an admin, a reused refresh
+  token or code, reconnecting the same tool) also revokes its grant in User
+  Management (`DELETE /api/v1/ai-grants`). If that call fails it is logged;
+  the person can still cut it off on User Management's My account page.
+  Connections made before AI grants existed keep a browser-session grant
+  and still end when that session does; reconnect them.
+- Signing out of this site is local only; it ends the browser session here,
+  not the AI connections. Those are ended on the Connected AI tools page.
 
 ### MCP
 
@@ -107,7 +117,7 @@ it sends them back to. **Connected AI tools** lists and ends connections.
   tool failure is a result with `isError: true` and a short sentence the
   AI can pass on, never a stack trace.
 - Results are short text (40 lines at most), dates and times in the
-  church's time zone (`TZ`, default America/New_York).
+  church's time zone (`TZ`, default America/Chicago).
 - The audit log (`tool_calls`, Activity page) records who, which AI
   tool, which tool, when, OK or not and how long. Never arguments or
   results.
@@ -166,9 +176,43 @@ Flags go before the command.
 
 ## Deploying
 
-Not yet: phase 4 adds `deploy/ansible` like the other apps
-(`mcp.<dns_zone>` on the apps box behind the edge proxy). State to carry:
-the database and `secrets.key`.
+Runs on `apps-1` behind the Caddy edge box at
+`https://mcp.mountainviewbaptist.church`, the same way as the other apps
+(`deploy/ansible`). State is `mcp.db` and `secrets.key` in
+`/var/lib/church-mcp`; backups, restores and moves carry both. There is no
+local login, so the first single sign-on connection is saved by the deploy.
+Only `with-do-church` is needed.
+
+1. User Management: change the `mcp` app's address and redirect URI from
+   `http://localhost:8150` to `https://mcp.mountainviewbaptist.church` (and
+   `.../auth/callback`) on its Apps page. `register-app` can't do it: for an
+   app that's already registered it leaves the address alone. Its client
+   secret must be in the Mac Keychain as `um-mcp` (the deploy reads it in
+   step 4; to make a new one, run User Management's `register-app mcp
+   --rotate-secret` and save the result under that name).
+2. Edge box and DNS: nothing to add in `edge_proxy` except
+   `mcp.mountainviewbaptist.church` under `app_domains` in its `vars.yml` (for
+   `make verify`). The DNS record is made by this app's provision, and the
+   Caddy site is written by its deploy.
+3. `cd mcp_server && with-do-church make provision`. It creates or finds
+   `apps-1`, makes the A record, installs the binary and unit (`ADDR` on the
+   VPC address, `TRUST_PROXY=1`, `TZ=America/Chicago`), and runs the deploy.
+   Later releases: `with-do-church make deploy`.
+4. First single sign-on: the deploy does it. When the database has no saved
+   SSO yet (or with `make deploy SET_SSO=true`), it reads the Keychain item
+   `um-mcp` and pipes it on stdin to
+   `church-mcp connection set-sso https://accounts.mountainviewbaptist.church mcp https://mcp.mountainviewbaptist.church`.
+   The secret never appears in a command line or the output. Skip with
+   `-e sso_set_on_deploy=false` in `deploy/ansible`. Then open
+   `https://mcp.mountainviewbaptist.church/healthz`.
+5. In claude.ai, Settings, Connectors, add a custom connector with
+   `https://mcp.mountainviewbaptist.church/mcp`, then sign in through User
+   Management.
+
+Backups and moves: `make backup FROM=apps-1`, `make restore`,
+`make move FROM=<box>` (see the Makefile). Caddy passes the `Authorization`,
+`WWW-Authenticate` and `Mcp-*` headers untouched; nothing in the site file
+changes them.
 
 ## Layout
 

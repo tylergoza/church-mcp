@@ -1,0 +1,122 @@
+# Defaults for every setting. Override any of them in vars.yml (gitignored;
+# start from vars.example.yml), which is loaded after this file.
+
+# DigitalOcean API token with read/write scope, from the environment so it
+# never lands in a file.
+do_token: "{{ lookup('env', 'DIGITALOCEAN_TOKEN') }}"
+
+# DigitalOcean team (as shown on the account) the token must belong to, so a
+# run can't touch the wrong account by mistake. Empty skips the check; set the
+# real name in vars.yml.
+do_team: ""
+
+# The apps box this app lives on. Several apps can share one: the first one
+# provisioned creates the box, the rest find it by tag and add their own user,
+# data folder and unit. Moving the app to another box is `make move`.
+apps_box: apps-1
+# Droplet. `doctl compute size list` / `region list` / `image list-distribution`
+# show the choices. nyc3 is New York 3; s-1vcpu-1gb is the $6/month Basic
+# droplet, which is plenty for this app.
+droplet_name: "{{ apps_box }}"
+do_region: nyc3
+do_size: s-1vcpu-1gb
+do_image: ubuntu-26-04-x64
+# Weekly droplet snapshots (adds 20% to the droplet price). The database and secrets.key are
+# the only state, and the pre-deploy backups below sit on the same disk.
+do_backups: true
+do_monitoring: true
+# Project (as named in the control panel) to put the droplet in. Empty means
+# the account's default project.
+do_project: ""
+# Droplets and deploys find each other by this tag.
+do_tag: "{{ apps_box }}"
+# Every apps box carries this tag too (the apps-internal firewall and the
+# monitoring alerts use it), and the edge box carries edge_tag.
+do_role_tag: apps
+edge_tag: edge
+# More tags for the droplet, e.g. ssh for the ssh firewall edge_proxy manages.
+# Added to existing droplets too on the next provision.
+do_extra_tags: []
+
+# Provision points app_domain's A record at the edge box. Turn off to leave
+# DNS alone.
+manage_dns: true
+# Monitoring alerts on every apps box, sent to the account's email address.
+alert_percent: 80
+# Swap file on the droplet.
+swap_size: 1G
+
+# Where the app listens on the box, on its VPC address (the drop-in sets
+# ADDR). The edge box proxies to it.
+app_port: 8150
+
+# Set by `make provision RESTORE_PENDING=true`: install the binary and unit but
+# don't start the app or create an admin, so `make restore` finds no database.
+restore_pending: false
+# Backups from `make backup` (the database and secrets.key, so
+# private) go here, outside every repo.
+local_backup_dir: ~/Backups/mountainview
+
+# Key Ansible connects with. Empty means your normal ssh setup (agent,
+# ~/.ssh/config). Set it to use a dedicated deploy key, e.g. when your usual
+# key is on a hardware token that asks for a PIN, which Ansible can't answer.
+ssh_private_key_file: ""
+# Agent holding that key, if not the one ~/.ssh/config picks (e.g. it points
+# at 1Password but the key was added with ssh-add). SSH_AUTH_SOCK means the
+# agent in your environment; anything else is a socket path.
+ssh_identity_agent: ""
+# Uploaded to your DigitalOcean account if it isn't there yet, and put on the
+# droplet for root when it's created.
+ssh_public_key_file: "{{ (ssh_private_key_file ~ '.pub') if ssh_private_key_file else '~/.ssh/id_ed25519.pub' }}"
+# More public key files to let in as root, e.g. your hardware-token keys when
+# Ansible uses a deploy key. Added on every provision; never removed.
+ssh_authorized_keys: []
+
+# Time zone: the unit's TZ, which decides what "today" means in tool answers.
+tz: America/Chicago
+
+# Single sign-on (User Management). church-mcp has no local login, so its first
+# SSO connection is set by deploy.yml from the Mac Keychain item um-mcp (the
+# client secret `register-app` saved), piped on stdin to
+# `church-mcp connection set-sso`, never in a command line or log. It runs when
+# SSO isn't saved in the database yet, or with -e set_sso=true (new secret, new
+# address). Set sso_set_on_deploy: false to skip it (e.g. when setting it on
+# /admin/connections instead). Nothing is put in the unit's environment, so the
+# values stay editable in the app.
+sso_set_on_deploy: true
+sso_url: https://accounts.mountainviewbaptist.church
+sso_client_id: mcp
+# The server's public https address; the sign-in return address is
+# base_url/auth/callback and must match the redirect URI in User Management.
+base_url: "https://{{ app_domain }}"
+keychain_service: um-mcp
+set_sso: false
+
+# Deploys back up the database (plus secrets.key, which the saved tokens need)
+# before installing a changed binary, and keep this many of those backups.
+keep_backups: 10
+# `make test` runs before every build; -e skip_tests=true skips it.
+skip_tests: false
+
+# Paths on the droplet, matching deploy/church-mcp.service.
+app_data_dir: /var/lib/church-mcp
+app_db: "{{ app_data_dir }}/mcp.db"
+app_backup_dir: "{{ app_data_dir }}/backups"
+
+do_headers:
+  Authorization: "Bearer {{ do_token }}"
+  Content-Type: application/json
+# ssh options for every box this repo connects to as root. A new droplet has a
+# host key we've never seen; trust it the first time. With a deploy key, offer
+# only that one, not every key in the agent.
+root_ssh_args: >-
+  -o StrictHostKeyChecking=accept-new
+  {{- ' -o IdentitiesOnly=yes' if ssh_private_key_file else '' }}
+  {{- (' -o IdentityAgent=' ~ ssh_identity_agent) if ssh_identity_agent else '' }}
+
+# Host names a restore swaps in the database before the app starts, e.g. after
+# changing domain: [{ from: a.example.org, to: a.example.net }]. Exact names only.
+address_rewrites: []
+# Where this app saves addresses.
+rewrite_columns:
+  - { table: settings, column: value }

@@ -37,7 +37,11 @@ type fakeUM struct {
 	ts        *httptest.Server
 	appURL    string
 	mu        sync.Mutex
-	revoked   bool
+	revoked   bool // everything ended (password reset, account disabled)
+	signedOut bool // the person signed out of User Management: ends the session grant only
+	aiLive    map[string]bool
+	aiMade    int
+	aiRevokes atomic.Int32
 	delegates atomic.Int32
 }
 
@@ -59,7 +63,8 @@ func (f *fakeUM) handler() http.Handler {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if r.Header.Get("X-Grant") != "grant-1" || f.revoked {
+		g := r.Header.Get("X-Grant")
+		if f.revoked || !(g == "grant-1" && !f.signedOut || f.aiLive[g]) {
 			fail(w, http.StatusUnauthorized, "invalid_grant")
 			return false
 		}
@@ -99,6 +104,38 @@ func (f *fakeUM) handler() http.Handler {
 		}
 		f.delegates.Add(1)
 		writeJSON(w, http.StatusOK, map[string]any{"token": "umd_calendar_alice", "expires_in": 900, "role": "user"})
+	})
+	// AI grants: made from the live session grant, survive signing out.
+	mux.HandleFunc("POST /api/v1/ai-grants", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Grant") != "grant-1" {
+			fail(w, http.StatusUnauthorized, "invalid_grant")
+			return
+		}
+		if !grantOK(w, r) {
+			return
+		}
+		f.mu.Lock()
+		f.aiMade++
+		g := fmt.Sprintf("umai_alice%d", f.aiMade)
+		if f.aiLive == nil {
+			f.aiLive = map[string]bool{}
+		}
+		f.aiLive[g] = true
+		f.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"grant": g})
+	})
+	mux.HandleFunc("DELETE /api/v1/ai-grants", func(w http.ResponseWriter, r *http.Request) {
+		if !basicOK(r) {
+			fail(w, http.StatusUnauthorized, "invalid_client")
+			return
+		}
+		f.mu.Lock()
+		g := r.Header.Get("X-Grant")
+		was := f.aiLive[g]
+		delete(f.aiLive, g)
+		f.mu.Unlock()
+		f.aiRevokes.Add(1)
+		writeJSON(w, http.StatusOK, map[string]any{"revoked": was})
 	})
 	mux.HandleFunc("GET /api/v1/me/apps", func(w http.ResponseWriter, r *http.Request) {
 		if grantOK(w, r) {
@@ -449,6 +486,10 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("connection survived refresh-token reuse: %d", resp.StatusCode)
 	}
 	_ = refresh2
+	// Both revocations so far (code reuse, refresh reuse) revoked their grants in UM.
+	if n := h.um.aiRevokes.Load(); n < 2 {
+		t.Errorf("UM AI grant revokes after code and refresh reuse: %d", n)
+	}
 
 	// Connect again and revoke it from the Connected AI tools page.
 	verifier, challenge = pkcePair("e")
@@ -499,17 +540,113 @@ func TestEndToEnd(t *testing.T) {
 
 func TestMCPMethodsAndHeaders(t *testing.T) {
 	h := newHarness(t)
-	// GET and DELETE are 405 (no SSE stream, no sessions).
+	// GET and DELETE without a valid token get the sign-in challenge (as
+	// POST does: claude.ai's connector check probes with GET); with one,
+	// 405 (no SSE stream, no sessions).
+	_, reg := h.register(testRedirect)
+	clientID, _ := reg["client_id"].(string)
+	verifier, challenge := pkcePair("methods")
+	code := h.authorize(h.browser(), clientID, challenge)
+	st, tok := h.token(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {clientID},
+		"redirect_uri": {testRedirect}, "code_verifier": {verifier}})
+	if st != http.StatusOK {
+		t.Fatalf("token: %d %v", st, tok)
+	}
+	access := tok["access_token"].(string)
 	for _, m := range []string{http.MethodGet, http.MethodDelete} {
+		for _, bearer := range []string{"", "mcpa_bogus"} {
+			req, _ := http.NewRequest(m, h.ts.URL+"/mcp", nil)
+			if bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+bearer)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.wantChallenge(resp, m+" /mcp token "+bearer)
+		}
 		req, _ := http.NewRequest(m, h.ts.URL+"/mcp", nil)
+		req.Header.Set("Authorization", "Bearer "+access)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil || resp.StatusCode != http.StatusMethodNotAllowed {
-			t.Errorf("%s /mcp: %v %v", m, err, resp.Status)
+			t.Errorf("%s /mcp signed in: %v %v", m, err, resp.Status)
 		}
 	}
 	// A foreign browser Origin is refused before anything else.
 	resp, _ := h.rpc("", map[string]string{"Origin": "https://evil.example.net"}, `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("foreign Origin: %d", resp.StatusCode)
+	}
+}
+
+// An AI connection has its own grant in User Management: signing out of
+// User Management doesn't cut it off, and ending it here revokes the grant.
+func TestConnectionOutlivesUMSignOut(t *testing.T) {
+	h := newHarness(t)
+	_, reg := h.register(testRedirect)
+	clientID, _ := reg["client_id"].(string)
+	b := h.browser()
+	connect := func(seed string) (access string) {
+		verifier, challenge := pkcePair(seed)
+		code := h.authorize(b, clientID, challenge)
+		st, tok := h.token(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {clientID},
+			"redirect_uri": {testRedirect}, "code_verifier": {verifier}})
+		if st != http.StatusOK {
+			t.Fatalf("token: %d %v", st, tok)
+		}
+		return tok["access_token"].(string)
+	}
+	legacy := map[string]string{"MCP-Protocol-Version": "2025-11-25"}
+	callWith := func(access string, id int) bool {
+		_, out := h.rpc(access, legacy, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"calendar_events","arguments":{"from":"2026-11-16","to":"2026-11-22"}}}`, id))
+		res, _ := out["result"].(map[string]any)
+		return res != nil && res["isError"] != true && strings.Contains(fmt.Sprint(res["content"]), "Choir practice")
+	}
+
+	access := connect("a")
+	// The connection holds an AI grant, sealed, not the session grant.
+	conns, _ := h.st.ConnectionsFor(1)
+	conn, err := h.st.GetConnection(conns[0].ID)
+	if err != nil || !strings.HasPrefix(conn.Grant, "umai_") {
+		t.Fatalf("connection grant: %q %v", conn.Grant, err)
+	}
+	var plain int
+	h.st.DB.QueryRow(`SELECT COUNT(*) FROM ai_connections WHERE grant_sealed LIKE '%umai_%'`).Scan(&plain)
+	if plain != 0 {
+		t.Error("the grant should be stored sealed")
+	}
+
+	// Signing out of User Management ends the session grant only. The
+	// connection's re-check (due now) still passes and tools/call works.
+	h.um.mu.Lock()
+	h.um.signedOut = true
+	h.um.mu.Unlock()
+	h.st.DB.Exec(`UPDATE ai_connections SET grant_checked_at = '2000-01-01 00:00:00'`)
+	if !callWith(access, 1) {
+		t.Fatal("tools/call failed after a User Management sign-out")
+	}
+
+	// Revoking on the Connected AI tools page revokes the grant there.
+	page, err := b.Get(h.ts.URL + "/ai-tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	m := regexp.MustCompile(`action="/ai-tools/(\d+)/revoke"`).FindSubmatch(html)
+	cm := csrfField.FindSubmatch(html)
+	if m == nil || cm == nil {
+		t.Fatalf("no revoke button on /ai-tools:\n%s", html)
+	}
+	r, err := b.PostForm(h.ts.URL+"/ai-tools/"+string(m[1])+"/revoke", url.Values{"_csrf": {string(cm[1])}})
+	if err != nil || r.StatusCode != http.StatusOK {
+		t.Fatalf("revoke: %v %v", err, r.Status)
+	}
+	r.Body.Close()
+	if h.um.aiRevokes.Load() != 1 || len(h.um.aiLive) != 0 {
+		t.Errorf("UM revoke calls: %d, live grants %v", h.um.aiRevokes.Load(), h.um.aiLive)
+	}
+	if callWith(access, 2) {
+		t.Error("tools/call worked after revoking")
 	}
 }

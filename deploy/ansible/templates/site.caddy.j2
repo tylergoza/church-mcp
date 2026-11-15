@@ -1,0 +1,6 @@
+# /etc/caddy/sites/church-mcp.caddy, managed by the church MCP server's
+# deploy/ansible; edits here are overwritten on the next deploy.
+{{ app_domain }} {
+	encode gzip
+	reverse_proxy {{ hostvars[groups['app'][0]].private_ip }}:{{ app_port }}
+}

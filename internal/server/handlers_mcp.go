@@ -62,6 +62,27 @@ func (s *Server) originOK(r *http.Request) bool {
 	return false
 }
 
+// handleMCPOther answers GET and DELETE on /mcp. Without a valid token it
+// gives the same 401 challenge as POST, so clients that probe with GET
+// (claude.ai's connector check does) find the sign-in; with one, 405 (no
+// SSE stream, no sessions).
+func (s *Server) handleMCPOther(w http.ResponseWriter, r *http.Request) {
+	if !s.originOK(r) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
+	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || strings.TrimSpace(tok) == "" {
+		s.challenge(w, r, false, "sign in to use these tools")
+		return
+	}
+	if _, _, err := s.store.AccessToken(strings.TrimSpace(tok)); err != nil {
+		s.challenge(w, r, true, "the access token is invalid, expired or revoked")
+		return
+	}
+	mcp.ServeGet(w)
+}
+
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if !s.originOK(r) {
 		http.Error(w, "origin not allowed", http.StatusForbidden)

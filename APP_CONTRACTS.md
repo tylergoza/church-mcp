@@ -97,7 +97,7 @@ from it; the reuse steps are in the header of `me_auth.go`.
 ### Formats
 
 - Dates are `YYYY-MM-DD`; times are `HH:MM`, 24 hour. Both are church local
-  time with no zone (each app uses its `TZ` env, `America/New_York`).
+  time with no zone (each app uses its `TZ` env, `America/Chicago`).
 - A missing optional field is omitted or an empty string. A blank time means
   all day. `ends_on` omitted or equal to `starts_on` means a single day.
 - Lists are always JSON arrays, `[]` when empty, never `null`, and in an
@@ -338,9 +338,12 @@ queried separately by `tracker_find`.
 | GET | `/api/v1/me/places` | `q` (optional text search of name/path) | `tracker_find` |
 | GET | `/api/v1/me/products` | `q` | `tracker_find` |
 | GET | `/api/v1/me/items` | `q` | `tracker_find` |
-| GET | `/api/v1/me/supplies` | `q`, `low=1` (only supplies low or out) | `tracker_find` |
+| GET | `/api/v1/me/supplies` | `q`, `low=1` (only supplies low or out); neither = every supply | `tracker_find` |
+| GET | `/api/v1/me/tasks` | `q`, `status` (`overdue`, `due-soon`, `upcoming`, `unscheduled`), `place` (text of the place path), `limit` | `tracker_maintenance` |
+| GET | `/api/v1/me/history` | `q`, `item` (item id), `since` (YYYY-MM-DD, inclusive), `limit` | `tracker_history` |
 
-`q` is omitted when the model asks for just low supplies. For `low=1` the
+`q` is omitted when the model asks for just low supplies, or for every
+supply (`tracker_find` with `kind: supplies` and no q: the stock overview). For `low=1` the
 tool calls only `/supplies`. Search is case-insensitive over names (and for
 items the manufacturer and model, for places the path). Cap each list at 100;
 the tool shows 40.
@@ -357,14 +360,64 @@ the tool shows 40.
     GET /api/v1/me/items?q=projector
     {"items":[{"id":31,"name":"Epson projector","category":"AV","quantity":1,
                "place":{"id":4,"path":"Main Building / Fellowship Hall"},
-               "manufacturer":"Epson","model":"EB-992F"}]}
+               "manufacturer":"Epson","model":"EB-992F","notes":"",
+               "supply":"","supply_per":1,"units":[]}]}
 
     GET /api/v1/me/supplies?low=1
     {"supplies":[{"id":2,"name":"Paper towels","unit":"rolls",
                   "place":{"id":6,"path":"Main Building / Kitchen"},
                   "on_hand":2,"total":10,"stock":"low"}]}
 
-Fields read: places `id`, `name`, `path`, `kind`, `bookable`, `address`
+    GET /api/v1/me/tasks?q=filter&status=overdue
+    {"tasks":[{"id":1,"item":"Furnace",
+               "place":{"id":3,"path":"Main Building / Mechanical Room"},
+               "name":"Change air filter","interval":"Every 3 months",
+               "last_completed_on":"2026-04-12","next_due_on":"2026-07-12",
+               "status":"overdue","supply":"Furnace filters",
+               "supply_amount":1,"supply_short":false,
+               "description":"","quantity":1,"item_notes":"","units":[]}]}
+
+    A group item's task (four air returns in one room):
+               …"item":"Air Return","name":"Check Filters","supply":"14x30 Filter",
+               "supply_amount":4,"quantity":4,
+               "units":[{"number":1,"id":"1","label":"Northwest (away from sanctuary)",
+                         "last_replaced":"2026-11-07"}, … #2–#4]
+
+    GET /api/v1/me/history?q=filter&since=2026-01-01&limit=40
+    {"history":[{"id":9,"performed_on":"2026-04-12","item":"Furnace",
+                 "place":{"id":3,"path":"Main Building / Mechanical Room"},
+                 "task":"Change air filter","kind":"replaced",
+                 "replaced":"2 × Furnace filters",
+                 "units":"#1 – Northwest; #3 – Northeast","supply_used":"",
+                 "performed_by":"Eddie",
+                 "notes":"20x25x1"}]}
+
+`tasks` are active tasks only, most urgent first (overdue, due-soon,
+upcoming, unscheduled; soonest due first within each); `q` matches the item
+(product) name, task name or supply name; `interval` is a label ("Every 3
+months", "One time"); `last_completed_on` and `next_due_on` are YYYY-MM-DD or
+`""`; `supply` is `""` when the task uses none; `supply_amount` is how many
+one completion uses (0 when none); `supply_short` is true when
+too little is on hand to do it once; `description` is the task's
+instructions; `quantity`, `item_notes` and `units` are the item's (`units`
+lists a group item's numbered units with their location labels and when each
+one's supply was last replaced; `[]` for a single item). Items carry the same
+`notes`, `supply`, `supply_per` and `units`. `history` is newest first; `q` matches
+item name, task name, the item's supply and any supply taken; `kind` is
+`work`, `replaced` or `moved`; `units` names which units of a group item
+the entry was about (`""` when not recorded); `supply_used` is stock taken,
+e.g. `"4 × 14x30 Filter"`; `replaced` is `""` or e.g. `"2 × Furnace
+filters"`, on any kind (filters swapped during a `work` task count); `performed_by` falls back to whoever logged it. A bad `status`,
+`since` or `item` is 400 `{"error":…}`. No cost or serial numbers are sent.
+Item notes are (every signed-in person sees them on the item page). Visibility: every signed-in person (editor or
+admin) sees maintenance and history on the web pages (`auth` routes in the
+tracker's `routes.go`, not admin-only), so every token the gate lets in gets
+the same lists.
+
+Fields read: tasks `item`, `name`, `interval`, `last_completed_on`,
+`next_due_on`, `status`, `supply`, `supply_short`, `place.path` (`id` parsed
+only); history `performed_on`, `item`, `task`, `kind`, `replaced`,
+`performed_by`, `notes`, `place.path`. Places `id`, `name`, `path`, `kind`, `bookable`, `address`
 (`tags` parsed only); products `id`, `name`, `category`, `total`,
 `place_count`; items `id`, `name`, `quantity`, `manufacturer`, `model`,
 `place.path` (`category`, `place.id` parsed only); supplies `id`, `name`,

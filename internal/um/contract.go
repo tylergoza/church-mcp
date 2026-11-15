@@ -11,6 +11,13 @@
 //	     {"audience":"calendar"} -> {"token":"umd_…","expires_in":900,"role":"member"}
 //	     401 invalid_grant: the grant is gone (signed out, disabled)
 //	     403 no_access / not_accepted, 404 unknown_audience: no tool for that app
+//	POST {um}/api/v1/ai-grants    Basic + X-Grant: the browser-session grant from the sign-in
+//	     -> {"grant":"umai_…"}: a grant of its own, not tied to the browser session,
+//	     that survives signing out of User Management. It ends on password
+//	     change/reset, disabled account, losing the mcp role, or revocation.
+//	     Works wherever a grant does (/api/v1/grant, me/apps, delegate).
+//	     403 not_allowed: this app has no "May act for users in" list
+//	DELETE {um}/api/v1/ai-grants  Basic + X-Grant: the umai_ grant -> {"revoked":true|false}
 //	GET  {um}/api/v1/me/apps      Basic + X-Grant
 //	     -> {"apps":[{"audience":"calendar","name":"Church Calendar","role":"member","url":"https://…"}]}
 package um
@@ -59,6 +66,20 @@ type Delegator interface {
 	Delegate(ctx context.Context, grant, audience string) (Token, error)
 	MyApps(ctx context.Context, grant string) ([]App, error)
 }
+
+// GrantIssuer swaps a browser-session grant for a long-lived AI grant and
+// revokes it again.
+type GrantIssuer interface {
+	// MakeAIGrant trades the session grant from the SSO sign-in for an AI
+	// grant. ErrNoAccess if this app isn't allowed to hold one.
+	MakeAIGrant(ctx context.Context, sessionGrant string) (string, error)
+	// RevokeAIGrant ends an AI grant. Anything that isn't one is ignored,
+	// and so is one that's already gone.
+	RevokeAIGrant(ctx context.Context, grant string) error
+}
+
+// AIGrantPrefix starts every AI grant ID.
+const AIGrantPrefix = "umai_"
 
 // HTTP is the Delegator that talks to User Management.
 type HTTP struct {
@@ -154,4 +175,28 @@ func (h *HTTP) do(ctx context.Context, method, path, grant string, body []byte, 
 		return fmt.Errorf("%w: unexpected answer", ErrUnreachable)
 	}
 	return nil
+}
+
+func (h *HTTP) MakeAIGrant(ctx context.Context, sessionGrant string) (string, error) {
+	var out struct {
+		Grant string `json:"grant"`
+	}
+	if err := h.do(ctx, http.MethodPost, "/api/v1/ai-grants", sessionGrant, nil, &out); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(out.Grant, AIGrantPrefix) {
+		return "", fmt.Errorf("%w: unexpected ai-grants answer", ErrUnreachable)
+	}
+	return out.Grant, nil
+}
+
+func (h *HTTP) RevokeAIGrant(ctx context.Context, grant string) error {
+	if !strings.HasPrefix(grant, AIGrantPrefix) {
+		return nil // a connection made before AI grants: it died with the browser session
+	}
+	err := h.do(ctx, http.MethodDelete, "/api/v1/ai-grants", grant, nil, &struct{}{})
+	if errors.Is(err, ErrGrantRevoked) {
+		return nil // already gone
+	}
+	return err
 }

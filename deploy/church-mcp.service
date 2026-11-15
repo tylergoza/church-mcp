@@ -1,0 +1,34 @@
+# systemd unit for running the binary directly (no Docker). Install:
+#   sudo useradd --system --home-dir /var/lib/church-mcp --shell /usr/sbin/nologin mcp
+#   sudo install -m 755 church-mcp-linux-amd64 /usr/local/bin/church-mcp
+#   sudo cp church-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now church-mcp
+# Edit TZ below first. Run commands as the service user against the same
+# database, flags before the command:
+#   sudo -u mcp church-mcp -db /var/lib/church-mcp/mcp.db backup /tmp/x.db
+# Logs: journalctl -u church-mcp -f
+[Unit]
+Description=Church MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mcp
+StateDirectory=church-mcp
+Environment=ADDR=127.0.0.1:8150
+Environment=DB_PATH=/var/lib/church-mcp/mcp.db
+Environment=TZ=America/Chicago
+# The edge box's Caddy is in front; it's the only thing that can reach
+# 127.0.0.1:8150, so its X-Forwarded-* headers can be trusted. The Ansible
+# deploy overrides ADDR with the box's VPC address, which the edge box's Caddy
+# reaches and a firewall limits to it.
+Environment=TRUST_PROXY=1
+ExecStart=/usr/local/bin/church-mcp
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
