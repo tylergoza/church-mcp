@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -114,9 +116,83 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.TouchConnection(conn.ID)
 	p := &provider{s: s, conn: conn, user: user}
-	if err := mcp.Serve(w, r, s.mcpInfo(user), p); errors.Is(err, mcp.ErrUnauthorized) {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, mcp.MaxBody+1))
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	rec := &rpcRecorder{ResponseWriter: w}
+	err = mcp.Serve(rec, r, s.mcpInfo(user), p)
+	if errors.Is(err, mcp.ErrUnauthorized) {
 		s.challenge(w, r, true, "this connection has ended; connect again")
 	}
+	s.logRPC(r, body, rec, err)
+}
+
+// rpcRecorder keeps the status and the start of the body so logRPC can
+// report JSON-RPC errors that ride on a 200.
+type rpcRecorder struct {
+	http.ResponseWriter
+	status int
+	head   []byte
+}
+
+func (r *rpcRecorder) WriteHeader(code int) {
+	if r.status == 0 {
+		r.status = code
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *rpcRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	if room := 65536 - len(r.head); room > 0 {
+		r.head = append(r.head, b[:min(room, len(b))]...)
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+// logRPC logs the JSON-RPC method, protocol version and any error message.
+// Never arguments or results (the audit rule): only the method name, the
+// tool name for tools/call, and the error's own text.
+func (s *Server) logRPC(r *http.Request, body []byte, rec *rpcRecorder, serveErr error) {
+	var req struct {
+		Method string `json:"method"`
+		Params struct {
+			Name            string         `json:"name"`
+			ProtocolVersion string         `json:"protocolVersion"`
+			Meta            map[string]any `json:"_meta"`
+		} `json:"params"`
+	}
+	json.Unmarshal(body, &req)
+	var resp struct {
+		Result struct {
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	json.Unmarshal(rec.head, &resp)
+	attrs := []any{"method", req.Method, "status", rec.status,
+		"header_version", r.Header.Get("MCP-Protocol-Version"),
+		"client_version", req.Params.ProtocolVersion}
+	if v, ok := req.Params.Meta["io.modelcontextprotocol/protocolVersion"]; ok {
+		attrs = append(attrs, "meta_version", v)
+	}
+	if req.Method == "tools/call" {
+		attrs = append(attrs, "tool", req.Params.Name)
+	}
+	if req.Method == "tools/list" && resp.Error == nil && len(rec.head) < 65536 {
+		attrs = append(attrs, "tools", len(resp.Result.Tools))
+	}
+	if resp.Error != nil {
+		attrs = append(attrs, "rpc_code", resp.Error.Code, "rpc_error", resp.Error.Message)
+	}
+	if serveErr != nil {
+		attrs = append(attrs, "err", serveErr)
+	}
+	s.log.Info("mcp", attrs...)
 }
 
 // provider is the tools for one person over one connection.
