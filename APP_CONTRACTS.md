@@ -341,6 +341,7 @@ queried separately by `tracker_find`.
 | GET | `/api/v1/me/supplies` | `q`, `low=1` (only supplies low or out); neither = every supply | `tracker_find` |
 | GET | `/api/v1/me/tasks` | `q`, `status` (`overdue`, `due-soon`, `upcoming`, `unscheduled`), `place` (text of the place path), `limit` | `tracker_maintenance` |
 | GET | `/api/v1/me/history` | `q`, `item` (item id), `since` (YYYY-MM-DD, inclusive), `limit` | `tracker_history` |
+| GET | `/api/v1/me/problems` | `q`, `status` (`active` = open or in progress, the default; `open`, `in_progress`, `resolved`, `all`), `place` (text of the place path), `limit` | `tracker_problems` |
 
 `q` is omitted when the model asks for just low supplies, or for every
 supply (`tracker_find` with `kind: supplies` and no q: the stock overview). For `low=1` the
@@ -391,6 +392,25 @@ the tool shows 40.
                  "units":"#1 – Northwest; #3 – Northeast","supply_used":"",
                  "performed_by":"Eddie",
                  "notes":"20x25x1"}]}
+
+    GET /api/v1/me/problems?q=tv&limit=40
+    {"problems":[{"id":4,"title":"TV won't turn on","details":"No power light.",
+                  "status":"in_progress","item":"Hall TV","unit":"#2 – left of the stage",
+                  "place":{"id":3,"path":"Main Building / Fellowship Hall"},
+                  "assigned_to":"Eddie","reported_by":"Ann",
+                  "created_at":"2026-11-08T15:04:00Z","updated_at":"2026-11-09T16:00:00Z",
+                  "resolved_at":"",
+                  "updates":[{"at":"2026-11-09T16:00:00Z","by":"Eddie",
+                              "status":"in_progress","assigned_to":"",
+                              "note":"Ordered a new power board."}]}]}
+
+`problems` are problem reports, newest first; `q` matches the title,
+details, item name and place path; times are RFC 3339 UTC (the tool shows
+them in the church's zone); `item`/`unit`/`assigned_to`/`resolved_at` are
+`""` when not set; `updates` are oldest first, at most the last 10, with
+`status`/`assigned_to` set only when that update changed them. The
+reporter's contact details are never sent. Every signed-in person sees
+problems on the web (`auth` routes), so every token gets the same list.
 
 `tasks` are active tasks only, most urgent first (overdue, due-soon,
 upcoming, unscheduled; soonest due first within each); `q` matches the item

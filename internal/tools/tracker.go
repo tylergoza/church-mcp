@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tylergoza/church-mcp/internal/mcp"
 )
@@ -303,7 +305,112 @@ func trackerMaintenanceTools() []Def {
 				}
 				return lines("Maintenance history, newest first:", ls, "No maintenance history matches."), nil
 			}},
+		{App: "tracker", Tool: tool("tracker_problems", "Tracker: problem reports",
+			"Problem reports: things people reported broken or not working (a TV, a light, a leak, the sound board), with status (open, in progress, resolved), the item and place, who reported it, who it's assigned to, details and the latest updates. Use for \"what's broken?\", \"is anyone fixing the TV?\", \"what problems are open in the fellowship hall?\". By default shows open and in-progress reports; status \"resolved\" or \"all\" for fixed ones. For scheduled maintenance use tracker_maintenance.",
+			map[string]any{
+				"q":      str("Optional: matches the title, details, item or place, e.g. \"TV\" or \"leak\"."),
+				"status": enum("Optional: active (open or in progress, the default), open, in_progress, resolved or all.", "active", "open", "in_progress", "resolved", "all"),
+				"place":  str("Optional: only reports in a place, e.g. \"fellowship hall\"."),
+			}),
+			Run: func(ctx context.Context, env Env, raw json.RawMessage) (mcp.Result, error) {
+				var a struct{ Q, Status, Place string }
+				if err := parse(raw, &a); err != nil {
+					return mcp.Result{}, err
+				}
+				q := url.Values{}
+				for k, v := range map[string]string{"q": a.Q, "status": a.Status, "place": a.Place} {
+					if strings.TrimSpace(v) != "" {
+						q.Set(k, strings.TrimSpace(v))
+					}
+				}
+				q.Set("limit", fmt.Sprint(maxLines))
+				var out struct {
+					Problems []trProblem `json:"problems"`
+				}
+				if err := env.Get(ctx, "/api/v1/me/problems", q, &out); err != nil {
+					return mcp.Result{}, err
+				}
+				var ls []string
+				for _, p := range out.Problems {
+					ls = append(ls, p.line(env.Location()))
+				}
+				return lines("Problem reports, newest first:", ls, "No problem reports match."), nil
+			}},
 	}
+}
+
+type trProblemUpdate struct {
+	At         string `json:"at"`
+	By         string `json:"by"`
+	Status     string `json:"status"`
+	AssignedTo string `json:"assigned_to"`
+	Note       string `json:"note"`
+}
+
+type trProblem struct {
+	ID         int64             `json:"id"`
+	Title      string            `json:"title"`
+	Details    string            `json:"details"`
+	Status     string            `json:"status"`
+	Item       string            `json:"item"`
+	Unit       string            `json:"unit"`
+	Place      trPlaceRef        `json:"place"`
+	AssignedTo string            `json:"assigned_to"`
+	ReportedBy string            `json:"reported_by"`
+	CreatedAt  string            `json:"created_at"`
+	UpdatedAt  string            `json:"updated_at"`
+	ResolvedAt string            `json:"resolved_at"`
+	Updates    []trProblemUpdate `json:"updates"`
+}
+
+var problemStatus = map[string]string{"open": "OPEN", "in_progress": "IN PROGRESS", "resolved": "RESOLVED"}
+
+// localStamp turns an RFC 3339 time into "Sun Nov 15, 2026 2:05 PM" in
+// the church's time zone.
+func localStamp(ts string, loc *time.Location) string {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	return t.In(loc).Format("Mon Jan 2, 2006 3:04 PM")
+}
+
+func (p trProblem) line(loc *time.Location) string {
+	st := problemStatus[p.Status]
+	if st == "" {
+		st = strings.ToUpper(p.Status)
+	}
+	what := p.Title
+	if p.Item != "" {
+		what += " (" + join(", ", p.Item, p.Unit) + ")"
+	}
+	head := join("; ",
+		atPlace("at ", p.Place.Path),
+		atPlace("reported by ", p.ReportedBy)+atPlace(" on ", localStamp(p.CreatedAt, loc)),
+		"assigned to "+cmp.Or(p.AssignedTo, "nobody"),
+		atPlace("resolved ", localStamp(p.ResolvedAt, loc)))
+	s := fmt.Sprintf("%s: %s — %s", st, what, head)
+	if d := strings.TrimSpace(p.Details); d != "" {
+		s += "\n  Details: " + d
+	}
+	for _, u := range p.Updates {
+		var bits []string
+		if u.Status != "" {
+			bits = append(bits, "status → "+cmp.Or(problemStatus[u.Status], u.Status))
+		}
+		if u.AssignedTo != "" {
+			bits = append(bits, "assigned to "+u.AssignedTo)
+		}
+		if n := strings.TrimSpace(u.Note); n != "" {
+			bits = append(bits, n)
+		}
+		who := ""
+		if u.By != "" {
+			who = "(" + u.By + ")"
+		}
+		s += "\n  " + join(" ", localStamp(u.At, loc), who) + ": " + strings.Join(bits, "; ")
+	}
+	return s
 }
 
 func trackerSearch(ctx context.Context, env Env, kind string, q url.Values) ([]string, error) {

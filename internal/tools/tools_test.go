@@ -35,7 +35,7 @@ type fakeEnv struct {
 }
 
 func (f *fakeEnv) Location() *time.Location {
-	l, _ := time.LoadLocation("America/New_York")
+	l, _ := time.LoadLocation("America/Chicago")
 	return l
 }
 
@@ -158,5 +158,29 @@ func TestTrackerMaintenanceUnits(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
+	}
+}
+
+func TestTrackerProblems(t *testing.T) {
+	env := &fakeEnv{reply: `{"problems":[{"id":4,"title":"TV won't turn on","details":"No power light.","status":"in_progress","item":"Hall TV","unit":"#2 – left of the stage","place":{"id":3,"path":"Main / Fellowship Hall"},"assigned_to":"Eddie","reported_by":"Ann","created_at":"2026-11-08T15:04:00Z","updated_at":"2026-11-09T16:00:00Z","resolved_at":"","updates":[{"at":"2026-11-09T16:00:00Z","by":"Eddie","status":"in_progress","assigned_to":"","note":"Ordered a new power board."}]}]}`}
+	res, err := find("tracker_problems").Run(context.Background(), env, json.RawMessage(`{"q":"tv","place":"hall"}`))
+	if err != nil || res.IsError {
+		t.Fatal(err, res)
+	}
+	text := res.Content[0].Text
+	for _, want := range []string{
+		"IN PROGRESS: TV won't turn on (Hall TV, #2 – left of the stage) — at Main / Fellowship Hall; reported by Ann on Sun Nov 8, 2026 9:04 AM; assigned to Eddie",
+		"Details: No power light.",
+		"Mon Nov 9, 2026 10:00 AM (Eddie): status → IN PROGRESS; Ordered a new power board.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "resolved") {
+		t.Errorf("unresolved report says resolved:\n%s", text)
+	}
+	if env.paths[0] != "/api/v1/me/problems?limit=40&place=hall&q=tv" {
+		t.Errorf("called %v", env.paths)
 	}
 }
